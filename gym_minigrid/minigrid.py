@@ -584,13 +584,13 @@ class Grid:
         return deepcopy(self)
 
     def set(self, i, j, v):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        assert 0 <= i < self.width
+        assert 0 <= j < self.height
         self.grid[j * self.width + i] = v
 
     def get(self, i, j):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        assert 0 <= i < self.width
+        assert 0 <= j < self.height
         return self.grid[j * self.width + i]
 
     def horz_wall(self, x, y, length=None, obj_type=Wall):

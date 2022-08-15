@@ -1,40 +1,27 @@
 import warnings
 
 import gym
-import numpy as np
 import pytest
 from gym.envs.registration import EnvSpec
-from gym.utils.env_checker import check_env
+from gym.utils.env_checker import check_env, data_equivalence
 
 from gym_minigrid.minigrid import Grid, MissionSpace
-from tests.utils import all_testing_env_specs, assert_equals
-
-CHECK_ENV_IGNORE_WARNINGS = [
-    f"\x1b[33mWARN: {message}\x1b[0m"
-    for message in [
-        "A Box observation space minimum value is -infinity. This is probably too low.",
-        "A Box observation space maximum value is -infinity. This is probably too high.",
-        "For Box action spaces, we recommend using a symmetric and normalized space (range=[-1, 1] or [0, 1]). See https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html for more information.",
-        "Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.",
-        "Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.",
-        "Core environment is written in old step API which returns one bool instead of two. It is recommended to  norewrite the environment with new step API. ",
-    ]
-]
+from tests.utils import all_testing_env_specs
 
 
 @pytest.mark.parametrize(
     "spec", all_testing_env_specs, ids=[spec.id for spec in all_testing_env_specs]
 )
-def test_env(spec):
+def test_env_checker(spec):
     # Capture warnings
     env = spec.make(disable_env_checker=True).unwrapped
-    warnings.simplefilter("always")
+
     # Test if env adheres to Gym API
-    with warnings.catch_warnings(record=True) as w:
+    with warnings.catch_warnings(record=True) as check_env_warnings:
+        warnings.simplefilter("always")
         check_env(env)
-    for warning in w:
-        if warning.message.args[0] not in CHECK_ENV_IGNORE_WARNINGS:
-            raise gym.error.Error(f"Unexpected warning: {warning.message}")
+
+    assert len(check_env_warnings) == 0
 
 
 # Note that this precludes running this test in multiple threads.
@@ -57,16 +44,13 @@ def test_env_determinism_rollout(env_spec: EnvSpec):
     - observations are contained in the observation space
     - obs, rew, terminated, truncated and info are equals between the two envs
     """
-    # Don't check rollout equality if it's a nondeterministic environment.
-    if env_spec.nondeterministic is True:
-        return
-
     env_1 = env_spec.make(disable_env_checker=True, new_step_api=True)
     env_2 = env_spec.make(disable_env_checker=True, new_step_api=True)
 
     initial_obs_1 = env_1.reset(seed=SEED)
     initial_obs_2 = env_2.reset(seed=SEED)
-    assert_equals(initial_obs_1, initial_obs_2)
+    assert initial_obs_2 in env_1.observation_space
+    data_equivalence(initial_obs_1, initial_obs_2)
 
     env_1.action_space.seed(SEED)
 
@@ -77,7 +61,7 @@ def test_env_determinism_rollout(env_spec: EnvSpec):
         obs_1, rew_1, terminated_1, truncated_1, info_1 = env_1.step(action)
         obs_2, rew_2, terminated_2, truncated_2, info_2 = env_2.step(action)
 
-        assert_equals(obs_1, obs_2, f"[{time_step}] ")
+        data_equivalence(obs_1, obs_2)
         assert env_1.observation_space.contains(
             obs_1
         )  # obs_2 verified by previous assertion
@@ -89,13 +73,12 @@ def test_env_determinism_rollout(env_spec: EnvSpec):
         assert (
             truncated_1 == truncated_2
         ), f"[{time_step}] truncated 1={truncated_1}, truncated 2={truncated_2}"
-        assert_equals(info_1, info_2, f"[{time_step}] ")
+        data_equivalence(info_1, info_2)
 
         if (
             terminated_1 or truncated_1
         ):  # terminated_2 and truncated_2 verified by previous assertion
-            env_1.reset(seed=SEED)
-            env_2.reset(seed=SEED)
+            break
 
     env_1.close()
     env_2.close()
@@ -114,6 +97,8 @@ def test_render_modes(spec):
             new_env.reset()
             new_env.step(new_env.action_space.sample())
             new_env.render(mode=mode)
+            new_env.close()
+    env.close()
 
 
 @pytest.mark.parametrize("env_id", ["MiniGrid-DoorKey-6x6-v0"])
@@ -142,81 +127,7 @@ def test_agent_sees_method(env_id):
     env.close()
 
 
-@pytest.mark.parametrize(
-    "env_spec", all_testing_env_specs, ids=[spec.id for spec in all_testing_env_specs]
-)
-def old_run_test(env_spec):
-    # Load the gym environment
-    env = env_spec.make(new_step_api=True)
-    env.max_steps = min(env.max_steps, 200)
-    env.reset()
-    env.render()
-
-    # Verify that the same seed always produces the same environment
-    for i in range(0, 5):
-        seed = 1337 + i
-        _ = env.reset(seed=seed)
-        grid1 = env.grid
-        _ = env.reset(seed=seed)
-        grid2 = env.grid
-        assert grid1 == grid2
-
-    env.reset()
-
-    # Run for a few episodes
-    num_episodes = 0
-    while num_episodes < 5:
-        # Pick a random action
-        action = env.action_space.sample()
-
-        obs, reward, terminated, truncated, info = env.step(action)
-
-        # Validate the agent position
-        assert env.agent_pos[0] < env.width
-        assert env.agent_pos[1] < env.height
-
-        # Test observation encode/decode roundtrip
-        img = obs["image"]
-        grid, vis_mask = Grid.decode(img)
-        img2 = grid.encode(vis_mask=vis_mask)
-        assert np.array_equal(img, img2)
-
-        # Test the env to string function
-        str(env)
-
-        # Check that the reward is within the specified range
-        assert reward >= env.reward_range[0], reward
-        assert reward <= env.reward_range[1], reward
-
-        if terminated or truncated:
-            num_episodes += 1
-            env.reset()
-
-        env.render()
-
-    # Test the close method
-    env.close()
-
-
-@pytest.mark.parametrize("env_id", ["MiniGrid-Empty-8x8-v0"])
-def test_interactive_mode(env_id):
-    env = gym.make(env_id, new_step_api=True)
-    env.reset()
-
-    for i in range(0, 100):
-        print(f"step {i}")
-
-        # Pick a random action
-        action = env.action_space.sample()
-
-        obs, reward, terminated, truncated, info = env.step(action)
-
-    # Test the close method
-    env.close()
-
-
 def test_mission_space():
-
     # Test placeholders
     mission_space = MissionSpace(
         mission_func=lambda color, obj_type: f"Get the {color} {obj_type}.",

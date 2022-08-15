@@ -17,21 +17,18 @@ class ReseedWrapper(Wrapper):
     configuration when reset.
     """
 
-    def __init__(self, env, seeds=[0], seed_idx=0):
+    def __init__(self, env, seeds=(0,), seed_idx=0):
         self.seeds = list(seeds)
         self.seed_idx = seed_idx
-        super().__init__(env)
+        super().__init__(env, new_step_api=True)
 
     def reset(self, **kwargs):
-        seed = self.seeds[self.seed_idx]
+        seed = kwargs.pop("seed", self.seeds[self.seed_idx])
         self.seed_idx = (self.seed_idx + 1) % len(self.seeds)
         return self.env.reset(seed=seed, **kwargs)
 
-    def step(self, action):
-        return self.env.step(action)
 
-
-class ActionBonus(gym.Wrapper):
+class ActionBonusWrapper(gym.Wrapper):
     """
     Wrapper which adds an exploration bonus.
     This is a reward to encourage exploration of less
@@ -62,11 +59,8 @@ class ActionBonus(gym.Wrapper):
 
         return obs, reward, terminated, truncated, info
 
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
 
-
-class StateBonus(Wrapper):
+class StateBonusWrapper(Wrapper):
     """
     Adds an exploration bonus based on which positions
     are visited on the grid.
@@ -98,9 +92,6 @@ class StateBonus(Wrapper):
 
         return obs, reward, terminated, truncated, info
 
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
-
 
 class ImgObsWrapper(ObservationWrapper):
     """
@@ -123,20 +114,22 @@ class OneHotPartialObsWrapper(ObservationWrapper):
 
     def __init__(self, env, tile_size=8):
         super().__init__(env)
-
         self.tile_size = tile_size
 
+        assert isinstance(env.observation_space, spaces.Dict)
         obs_shape = env.observation_space["image"].shape
+        assert isinstance(obs_shape, tuple) and len(obs_shape) == 2
 
         # Number of bits per cell
         num_bits = len(OBJECT_TO_IDX) + len(COLOR_TO_IDX) + len(STATE_TO_IDX)
-
         new_image_space = spaces.Box(
             low=0, high=255, shape=(obs_shape[0], obs_shape[1], num_bits), dtype="uint8"
         )
+
         self.observation_space = spaces.Dict(
-            {**self.observation_space.spaces, "image": new_image_space}
+            {**env.observation_space.spaces, "image": new_image_space}
         )
+        assert new_image_space is self.observation_space.spaces["image"]
 
     def observation(self, obs):
         img = obs["image"]
@@ -251,7 +244,7 @@ class DictObservationSpaceWrapper(ObservationWrapper):
     where the textual instructions are replaced by arrays representing the indices of each word in a fixed vocabulary.
     """
 
-    def __init__(self, env, max_words_in_mission=50, word_dict=None):
+    def __init__(self, env, max_words_in_mission: int = 50, word_dict=None):
         """
         max_words_in_mission is the length of the array to represent a mission, value 0 for missing words
         word_dict is a dictionary of words to use (keys=words, values=indices from 1 to < max_words_in_mission),
@@ -264,19 +257,13 @@ class DictObservationSpaceWrapper(ObservationWrapper):
 
         self.max_words_in_mission = max_words_in_mission
         self.word_dict = word_dict
+        self.num_words = len(self.word_dict)
 
-        image_observation_space = spaces.Box(
-            low=0,
-            high=255,
-            shape=(self.agent_view_size, self.agent_view_size, 3),
-            dtype="uint8",
-        )
         self.observation_space = spaces.Dict(
             {
-                "image": image_observation_space,
-                "direction": spaces.Discrete(4),
+                **self.observation_space.spaces,
                 "mission": spaces.MultiDiscrete(
-                    [len(self.word_dict.keys())] * max_words_in_mission
+                    [self.num_words + 1] * max_words_in_mission
                 ),
             }
         )
@@ -356,10 +343,10 @@ class DictObservationSpaceWrapper(ObservationWrapper):
         return indices
 
     def observation(self, obs):
-        obs["mission"] = self.string_to_indices(obs["mission"])
-        assert len(obs["mission"]) < self.max_words_in_mission
-        obs["mission"] += [0] * (self.max_words_in_mission - len(obs["mission"]))
-
+        mission = self.string_to_indices(obs["mission"])
+        assert len(mission) < self.max_words_in_mission
+        mission += [0] * (self.max_words_in_mission - len(mission))
+        obs["mission"] = np.array(mission)
         return obs
 
 
@@ -399,7 +386,7 @@ class FlatObsWrapper(ObservationWrapper):
             mission = mission.lower()
 
             strArray = np.zeros(
-                shape=(self.maxStrLen, self.numCharCodes), dtype="float32"
+                shape=(self.maxStrLen, self.numCharCodes), dtype=np.uint8
             )
 
             for idx, ch in enumerate(mission):
@@ -413,18 +400,20 @@ class FlatObsWrapper(ObservationWrapper):
                     raise ValueError(
                         f"Character {ch} is not available in mission string."
                     )
-                assert chNo < self.numCharCodes, "%s : %d" % (ch, chNo)
+                assert chNo < self.numCharCodes, f"{ch} : {chNo:d}"
                 strArray[idx, chNo] = 1
 
             self.cachedStr = mission
             self.cachedArray = strArray
 
-        obs = np.concatenate((image.flatten(), self.cachedArray.flatten()))
+        obs = np.concatenate(
+            (image.flatten(), self.cachedArray.flatten()), dtype=np.uint8
+        )
 
         return obs
 
 
-class ViewSizeWrapper(Wrapper):
+class ViewSizeWrapper(ObservationWrapper):
     """
     Wrapper to customize the agent field of view size.
     This cannot be used with fully observable wrappers.
@@ -463,12 +452,25 @@ class DirectionObsWrapper(ObservationWrapper):
     """
     Provides the slope/angular direction to the goal with the observations as modeled by (y2 - y2 )/( x2 - x1)
     type = {slope , angle}
+
+    TODO - Wrapper is bugged
     """
 
     def __init__(self, env, type="slope"):
         super().__init__(env)
         self.goal_position: tuple = None
+
         self.type = type
+        if self.type == "slope":
+            self.observation_space["goal_direction"] = spaces.Box(-np.inf, np.inf, (1,))
+        elif self.type == "angle":
+            self.observation_space["goal_direction"] = spaces.Box(
+                -np.pi / 2, np.pi / 2, (1,)
+            )
+        else:
+            raise ValueError(
+                f"Expects type to be 'slope' or 'angle', actual value: {self.type}"
+            )
 
     def reset(self):
         obs = self.env.reset()
@@ -503,23 +505,30 @@ class SymbolicObsWrapper(ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
 
+        low = np.array([0, 0, -1])
+        high = np.array([self.env.width, self.env.height, max(OBJECT_TO_IDX.values())])
+        shape = (self.env.width, self.env.height, 3)
         new_image_space = spaces.Box(
-            low=0,
-            high=max(OBJECT_TO_IDX.values()),
-            shape=(self.env.width, self.env.height, 3),  # number of cells
-            dtype="uint8",
+            low=low * np.ones(shape),
+            high=high * np.ones(shape),
+            shape=shape,  # number of cells
+            dtype="int8",
         )
         self.observation_space = spaces.Dict(
-            {**self.observation_space.spaces, "image": new_image_space}
+            {**env.observation_space.spaces, "image": new_image_space}
         )
+        assert new_image_space is self.observation_space.spaces["image"]
 
     def observation(self, obs):
         objects = np.array(
             [OBJECT_TO_IDX[o.type] if o is not None else -1 for o in self.grid.grid]
         )
+        print(objects.shape, objects.max(), objects.min())
         w, h = self.width, self.height
         grid = np.mgrid[:w, :h]
-        grid = np.concatenate([grid, objects.reshape(1, w, h)])
+        print(grid.shape, grid.max(), grid.min())
+        grid = np.concatenate([grid, objects.reshape((1, w, h))])
+        print(grid.shape)
         grid = np.transpose(grid, (1, 2, 0))
-        obs["image"] = grid
+        obs["image"] = grid.astype(np.int8)
         return obs
